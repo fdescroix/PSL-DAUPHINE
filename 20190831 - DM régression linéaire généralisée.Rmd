@@ -1,0 +1,181 @@
+---
+title: ' Devoir Maison Executive Master Big Data : 31 Aout 2019'
+output:
+  html_document: default
+  header-includes:
+  - \usepackage{xcolor}
+  - \usepackage{url}
+  output: pdf_document
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Rappel de l'énoncé
+On cherche à prédire s'il pleuvra demain (colonne pluie.demain) à partir des données météo d'une ville en Suisse (Bâle).
+Nous disposons de jeux de données, un avec la valeur à prédire (meteo.train.csv) afin de construire notre modèle et un en attente de nos prédictions (meteo.test.csv).
+
+#Choix de la méthode
+mon étude s'est déroulé en plusieurs temps, découverte des données, étude ACP afin d'essayer de réduire les variables explicatives pertinentes, comparaison des fonctions logit ou probit, choix des variables explicatives, comparaison de différentes configuration avec comme critère d'efficacité la minimisation des prédictions mauvaises sachant que :
+- J'ai considéré qu'il n'était pas plus "grave" de prédire qu'il pleut alors qu'il fera beau que l'inverse.
+- j'ai considéré que le breakdown de probabilité à utiliser serait de 50%.
+
+
+## Librairies utilées
+par la suite nous utiliserons plusieurs librairies "dplyr" pour la gestion des tableaux et "FactoMineR" pour l'analyse ACP.
+```{r, warning=FALSE}
+rm(list=ls())
+library(dplyr)
+library('FactoMineR')
+library(caret)
+library(corrplot)
+```
+
+
+# Données de météo à Bâle en Suisse (2010, 2018)
+On lit les deux fichiers données plus un 3ème utilisés pour renommer les colonnes :
+```{r}
+dtrain = read.csv("D:/Dauphine/Module 2/DM/meteo.train.csv")
+dtest = read.csv("D:/Dauphine/Module 2/DM/meteo.test.csv")
+colrename=read.csv("D:/Dauphine/Module 2/DM/meteocol.csv")
+col=t(colrename)
+names(dtrain)=col
+coltest=col[,-47]
+names(dtest)=coltest
+```
+
+#Analyse préliminaire des données
+```{r, eval=FALSE}
+summary(dtrain)
+summary(dtest)
+```
+On constate que certaines colonnes sont vides. Nous décidons de les retirer de l'étude. On transformera également notre variable à expliquer afin de ne pas ce soucier de l'ordre d'apparition dans les fichiers. Nous constatons enfin que les deux fichiers sont structurés avec la même répartition de données. Notre modèle sur dtrain devrait donc être pertinent sur dtest :
+
+```{r, warning=FALSE}
+dtrain =  dtrain %>% select(-Hour,-Minute) 
+dtrain =  mutate(dtrain,pluiedemain=as.numeric(pluiedemain))
+```
+
+
+#statistiques descriptives
+```{r}
+table(dtrain$pluiedemain)
+table(dtrain$pluiedemain)/sum(table(dtrain$pluiedemain))
+```
+On remarque que la moyenne de jour avec pluie est de 49.75%.
+
+#Analyse ACP
+étude ACP des données pour essayer de réduire les variables explicatives.
+```{r}
+res.pca=PCA(dtrain)
+head(res.pca$eig, 13)
+```
+Les premiers résultats nous montrent que l'inertie est malheureusement bien répartie, nous allons avoir du mal à utiliser cette technique
+pour réduire nos variables explicatives. En effet l'étude de 13 composantes de l'ACP serait nécessaire pour arriver à 90% de l'inertie et il en faudrait 9 pour 80%.
+L'analyse de la contribution des variables explicatives aux 2 premiers axes nous apprends quand même certaines choses :
+
+```{r}
+res.pca$var$contrib[,1:2] 
+res.pca$var$cos2[,1:2]
+```
+Les mesures de vents notamment de rafales et de couvertures nuageuses sont 6 fois plus importante dans la probabilité de pluie que la moyennes des autres variables dans la construction de la premières composantes de l'ACP.
+
+#choix du modèle
+Etudiant un phénomène binaire nous allons utiliser les fonctions logit et probit :
+
+```{r}
+logit=glm(pluiedemain~., data=dtrain, family = binomial (link="logit"))
+summary(logit)
+```
+
+```{r}
+probit=glm(pluiedemain~., data=dtrain, family = binomial (link="probit"))
+summary(probit)
+```
+
+la création d'un modèle avec toutes la variables explicatives semble non optimal car seules 5 variables réussissent le test de student.
+Nous utiliserons par la suite la fonction step afin de choisir le modèle expliquant le mieux nos données selon le critère de l'AIC la plus faible :
+
+```{r, eval=FALSE}
+step(probit)
+step(logit)
+```
+La fonction probit trouve un modèle optimal à 14 variables alors que le modèle logit lui est à 12 en ayant en plus une AIC légèrement inférieure à 1412. Nous choisirons par la suite le modèle logit.
+
+Nous allons maintenant comparer ce modèle avec un modèle plus simple encore, si nous avions gardé que les variables pertinentes du premier modèle logit :
+```{r}
+logit_step=glm(pluiedemain~Temperaturemean2mabovegnd + CloudCovermeanLow + 
+             Windmean80m + Windmean900mb + WindDirectionmean900mb + Temperaturemin2mabovegnd + 
+             MeanSeaLevelPressuremax + CloudCovermaxHigh + CloudCovermaxmid + 
+             Windmin10m + Windmin900mb + WindGustmax,data = dtrain, family = binomial (link="logit"))
+summary(logit_step)
+
+logit_manual=glm(pluiedemain~WindDirectionmean900mb+CloudCovermaxmid+MeanSeaLevelPressuremax,data = dtrain, family = binomial (link="logit"))
+summary(logit_manual)
+anova(logit_manual,logit_step)
+```
+Le test de fisher de la fonction anova nous dit qu'il n'y a pas un modèle meilleur. Cependant le modèle trouvé automatiquement possède de meilleur caractéristique (déviance, AIC) mais il a beaucoup plus de variables explicatives 12 au lieu de 3. 
+
+#Prédiction
+Comparons leur qualité de prédiction, on applique une validation croisée sur nos deux modèles pour voir qui est le meilleur selon notre 
+hypothèse et critère initiale :
+```{r}
+res2=data.frame(pred1 = c(0,0,0,0,0,0,0,0,0,0), pred2 = c(0,0,0,0,0,0,0,0,0,0))
+for (i in 1:10)
+  {
+  set.seed(2) #sert à fixer le graine du tirage aléatoire
+  training.idx <- createDataPartition(dtrain$pluiedemain, p=0.7, list = FALSE) 
+  training <- dtrain[training.idx,] # creation du jeu de données "train" 
+  testing <- dtrain[-training.idx,] # creation du jeu de données "test"
+
+  logit_step=glm(pluiedemain~Temperaturemean2mabovegnd + CloudCovermeanLow + 
+             Windmean80m + Windmean900mb + WindDirectionmean900mb + Temperaturemin2mabovegnd + 
+             MeanSeaLevelPressuremax + CloudCovermaxHigh + CloudCovermaxmid + 
+             Windmin10m + Windmin900mb + WindGustmax,data = dtrain, family = binomial (link="logit"))
+  
+  logit_manual=glm(pluiedemain~WindDirectionmean900mb+CloudCovermaxmid+MeanSeaLevelPressuremax,data = dtrain, family = binomial(link="logit"))
+  
+  pred1 = predict(logit_step, type = "response", newdata = testing)
+  pred2 = predict(logit_manual, type = "response", newdata = testing)
+  
+  res2[i,1]=(table(pred1 > 0.5, testing$pluiedemain)[1,2]+table(pred1 > 0.5, testing$pluiedemain)[2,1])/length(pred1)
+  res2[i,2]=(table(pred2 > 0.5, testing$pluiedemain)[1,2]+table(pred2 > 0.5, testing$pluiedemain)[2,1])/length(pred2)
+  
+  }
+
+res2
+
+```
+Les modèles sont très proches puisqu'il n'y a qu'un % d'écart de fausses réponses. Nous choissirons par la suite le modèle le plus parcimonieux plus facile à expliquer et à maintenir. Nous avons constaté une grande répartition aléatoire dans les données, il sera difficile d'avoir une prédiction
+avec moins d'erreurs:
+
+```{r,eval=FALSE}
+Mypred = predict(logit_manual, type = "response", newdata = dtest)
+dtest = cbind(dtest,Mypred)
+dtest =  mutate(dtest,MypredBin = ifelse(Mypred > 0.5, T, F))
+head(dtest)
+write.csv2(dtest,"D:/Dauphine/Module 2/DM/meteo.test.Predit.csv")
+```
+
+
+
+
+ 
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
